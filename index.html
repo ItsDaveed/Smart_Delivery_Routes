@@ -41,6 +41,16 @@
     align-items:center;
     gap:8px;
   }
+  .live-badge{
+    font-size:10.5px;
+    font-weight:700;
+    color:#1a9c5c;
+    background:#E7F8EF;
+    border:1px solid #BEEBD3;
+    border-radius:999px;
+    padding:3px 9px;
+    letter-spacing:.02em;
+  }
   .subtitle{
     color:var(--muted);
     font-size:13.5px;
@@ -189,6 +199,7 @@
     padding:30px 10px;
     line-height:1.6;
   }
+  .empty button{ margin-top:4px; }
 
   .legend{
     border-top:1px solid var(--border);
@@ -206,6 +217,7 @@
     font-size:12px;
   }
   details p{ margin:6px 0 0; }
+  details code{ background:var(--bg); padding:1px 5px; border-radius:4px; font-size:10.5px; }
 
   /* restaurant pin */
   .r-pin{
@@ -266,8 +278,8 @@
 <body>
 
 <header>
-  <h1>🛵 Smart Delivery Routes</h1>
-  <div class="subtitle">This shows how a restaurant can find the fastest way to reach every delivery — using real streets and real one-way rules, not just a straight line on the map.</div>
+  <h1>🛵 Smart Delivery Routes <span class="live-badge">● LIVE API</span></h1>
+  <div class="subtitle">This shows how a restaurant can find the fastest way to reach every delivery — using real streets and real one-way rules, not just a straight line on the map. Every route below is calculated by a live routing server, not just this browser.</div>
 </header>
 
 <main>
@@ -292,7 +304,7 @@
       <div>↳ Small arrows show which way streets go. Routes bend around them instead of cutting straight across.</div>
       <details>
         <summary>ℹ️ How this actually works</summary>
-        <p>Under the hood, this uses <b>Dijkstra's algorithm</b> to calculate the true shortest legal driving distance from the restaurant to every delivery spot in one pass — respecting one-way streets instead of assuming you can drive as the crow flies.</p>
+        <p>Every time you add or remove a delivery, this page calls a live API running <b>Dijkstra's algorithm</b> at <code>smart-delivery-routes-live-api.onrender.com</code>. It calculates the true shortest legal driving distance from the restaurant to every delivery spot in one pass — respecting one-way streets instead of assuming you can drive as the crow flies. The server can take up to a minute to respond if it's been idle and is waking back up.</p>
       </details>
     </div>
   </aside>
@@ -301,9 +313,10 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script>
 /* =========================================================================
-   ROAD NETWORK — mirrors delivery_router.py's build_manhattan_grid()
-   Real approximate coordinates + block lengths for Midtown Manhattan;
-   one-way directions are a simplified stand-in for NYC's actual pattern.
+   ROAD GRID (visual only) — mirrors delivery_router.py's build_manhattan_grid()
+   Used to draw the base map (intersections + one-way arrows) and to snap
+   map clicks to the nearest intersection. The actual routing — distances,
+   paths, ETAs — is no longer computed here; it comes from the live API.
    ========================================================================= */
 const REF_LAT = 40.7580, REF_LON = -73.9855;
 const REF_AVE = 7, REF_ST = 42;
@@ -321,84 +334,19 @@ function ordinal(n){
 function nodeId(ave, st){ return `A${ave}S${st}`; }
 function label(ave, st){ return `${ordinal(ave)} Ave & ${ordinal(st)} St`; }
 
-const nodes = {};      // id -> {lat, lon, ave, st, label}
-const adj = {};        // id -> [{to, dist, street}]
-
+const nodes = {}; // id -> {lat, lon, ave, st, label}
 for(const ave of AVENUES){
   for(const st of STREETS){
     const lat = REF_LAT + (st - REF_ST) * BLOCK_NS_M * LAT_PER_M;
     const lon = REF_LON - (ave - REF_AVE) * BLOCK_EW_M * LON_PER_M;
-    const id = nodeId(ave, st);
-    nodes[id] = { lat, lon, ave, st, label: label(ave, st) };
-    adj[id] = [];
+    nodes[nodeId(ave, st)] = { lat, lon, ave, st, label: label(ave, st) };
   }
 }
-function addEdge(a, b, dist, street){ adj[a].push({to:b, dist, street}); }
 
-// streets: east-west lines, one direction each (simplified NYC rule)
 const streetMeta = {}; // st -> {eastbound}
-for(const st of STREETS){
-  const eastbound = (st % 2 === 0);
-  streetMeta[st] = { eastbound };
-  for(let i=0;i<AVENUES.length-1;i++){
-    const a1=AVENUES[i], a2=AVENUES[i+1];           // a1 is east of a2
-    const n1=nodeId(a1,st), n2=nodeId(a2,st);
-    const name = `${ordinal(st)} St`;
-    if(eastbound) addEdge(n2, n1, BLOCK_EW_M, name);
-    else addEdge(n1, n2, BLOCK_EW_M, name);
-  }
-}
-// avenues: north-south lines, one direction each
+for(const st of STREETS){ streetMeta[st] = { eastbound: (st % 2 === 0) }; }
 const aveMeta = {}; // ave -> {northbound}
-for(const ave of AVENUES){
-  const northbound = (ave % 2 === 0);
-  aveMeta[ave] = { northbound };
-  for(let i=0;i<STREETS.length-1;i++){
-    const s1=STREETS[i], s2=STREETS[i+1];            // s2 is north of s1
-    const n1=nodeId(ave,s1), n2=nodeId(ave,s2);
-    const name = `${ordinal(ave)} Ave`;
-    if(northbound) addEdge(n1, n2, BLOCK_NS_M, name);
-    else addEdge(n2, n1, BLOCK_NS_M, name);
-  }
-}
-
-/* =========================================================================
-   DIJKSTRA — same idea as the Python version: a priority queue expanding
-   the closest unvisited intersection until every reachable stop is found.
-   ========================================================================= */
-function dijkstra(source){
-  const dist = {}, prev = {}, prevStreet = {}, visited = new Set();
-  dist[source] = 0;
-  const pq = [[0, source]];
-  while(pq.length){
-    pq.sort((a,b)=>a[0]-b[0]);
-    const [d,u] = pq.shift();
-    if(visited.has(u)) continue;
-    visited.add(u);
-    for(const e of adj[u]){
-      if(visited.has(e.to)) continue;
-      const nd = d + e.dist;
-      if(nd < (dist[e.to] ?? Infinity)){
-        dist[e.to] = nd; prev[e.to] = u; prevStreet[e.to] = e.street;
-        pq.push([nd, e.to]);
-      }
-    }
-  }
-  function pathTo(target){
-    if(!(target in dist)) return null;
-    const path = [target];
-    while(path[path.length-1] !== source){
-      const p = prev[path[path.length-1]];
-      if(p === undefined) return null;
-      path.push(p);
-    }
-    return path.reverse();
-  }
-  return { dist, pathTo };
-}
-
-const AVG_SPEED_KMH = 20;
-const etaMin = m => (m/1000/AVG_SPEED_KMH)*60;
+for(const ave of AVENUES){ aveMeta[ave] = { northbound: (ave % 2 === 0) }; }
 
 /* =========================================================================
    MAP SETUP
@@ -415,20 +363,17 @@ function bearingDeg(from, to){
   return (Math.atan2(dx,dy)*180/Math.PI + 360) % 360;
 }
 
-// base grid lines + one direction arrow per line (kept subtle on purpose)
 for(const ave of AVENUES){
   const pts = STREETS.map(st => nodes[nodeId(ave,st)]);
-  const latlngs = pts.map(p=>[p.lat,p.lon]);
-  L.polyline(latlngs, { color:'#D9D2C4', weight:2, opacity:.8 }).addTo(map);
+  L.polyline(pts.map(p=>[p.lat,p.lon]), { color:'#D9D2C4', weight:2, opacity:.8 }).addTo(map);
   const i = Math.floor(0.5*(pts.length-1));
   const a = pts[i], b = pts[Math.min(i+1,pts.length-1)];
   const from = aveMeta[ave].northbound ? a : b, to = aveMeta[ave].northbound ? b : a;
   placeArrow(from, to);
 }
 for(const st of STREETS){
-  const pts = AVENUES.map(ave => nodes[nodeId(ave,st)]); // ordered east(low ave)->west(high ave)
-  const latlngs = pts.map(p=>[p.lat,p.lon]);
-  L.polyline(latlngs, { color:'#D9D2C4', weight:2, opacity:.8 }).addTo(map);
+  const pts = AVENUES.map(ave => nodes[nodeId(ave,st)]);
+  L.polyline(pts.map(p=>[p.lat,p.lon]), { color:'#D9D2C4', weight:2, opacity:.8 }).addTo(map);
   const i = Math.floor(0.5*(pts.length-1));
   const a = pts[i], b = pts[Math.min(i+1,pts.length-1)];
   const from = streetMeta[st].eastbound ? b : a, to = streetMeta[st].eastbound ? a : b;
@@ -438,13 +383,32 @@ function placeArrow(from, to){
   const deg = bearingDeg(from, to);
   const mid = { lat:(from.lat+to.lat)/2, lon:(from.lon+to.lon)/2 };
   L.marker([mid.lat, mid.lon], {
-    icon: L.divIcon({
-      className:'',
-      html:`<div class="flow-arrow" style="transform:rotate(${deg}deg)"></div>`,
-      iconSize:[8,8], iconAnchor:[4,4]
-    }),
+    icon: L.divIcon({ className:'', html:`<div class="flow-arrow" style="transform:rotate(${deg}deg)"></div>`, iconSize:[8,8], iconAnchor:[4,4] }),
     interactive:false
   }).addTo(map);
+}
+
+/* =========================================================================
+   LIVE API
+   ========================================================================= */
+const API_BASE = 'https://smart-delivery-routes-live-api.onrender.com';
+
+async function fetchRoutes(depotId, customerIds){
+  const body = {
+    depot: `${nodes[depotId].ave},${nodes[depotId].st}`,
+    customers: customerIds.map(id => `${nodes[id].ave},${nodes[id].st}`)
+  };
+  const res = await fetch(`${API_BASE}/route`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if(!res.ok){
+    let detail = `Server responded with ${res.status}`;
+    try{ const j = await res.json(); if(j.detail) detail = j.detail; }catch(e){}
+    throw new Error(detail);
+  }
+  return res.json();
 }
 
 /* =========================================================================
@@ -455,6 +419,7 @@ const DEPOT_ID = nodeId(7, 40);
 let orderIds = [];
 let routeLayer = L.layerGroup().addTo(map);
 let markerLayer = L.layerGroup().addTo(map);
+let requestToken = 0;
 
 function nearestNode(latlng){
   let best=null, bestD=Infinity;
@@ -476,46 +441,84 @@ function randomOrders(n){
   return picked;
 }
 
-function render(){
-  const sp = dijkstra(DEPOT_ID);
-  routeLayer.clearLayers();
-  markerLayer.clearLayers();
-
-  // restaurant marker
+function drawDepotMarker(){
   L.marker([nodes[DEPOT_ID].lat, nodes[DEPOT_ID].lon], {
     icon: L.divIcon({ className:'', html:'<div class="r-pin"><div class="ring"></div>🍽️</div>', iconSize:[38,38], iconAnchor:[19,19] }),
     interactive:false
   }).addTo(markerLayer);
+}
 
-  const rows = orderIds.map((id,i)=>{
-    const color = ROUTE_COLORS[i % ROUTE_COLORS.length];
-    const path = sp.pathTo(id);
-    const dist = sp.dist[id];
-    const reachable = path && path.length>0;
-    if(reachable){
-      const latlngs = path.map(n=>[nodes[n].lat, nodes[n].lon]);
-      L.polyline(latlngs, { color, weight:5, opacity:.9, className:'route-line' }).addTo(routeLayer);
+function setStats(count, totalKm, longestMin){
+  document.getElementById('statOrders').textContent = count;
+  document.getElementById('statDist').textContent = totalKm;
+  document.getElementById('statEta').textContent = longestMin;
+}
+
+async function render(){
+  const myToken = ++requestToken;
+  routeLayer.clearLayers();
+  markerLayer.clearLayers();
+  drawDepotMarker();
+
+  const ordersEl = document.getElementById('orders');
+
+  if(orderIds.length === 0){
+    ordersEl.innerHTML = `<div class="empty">No deliveries yet.<br>Tap the map to add one.</div>`;
+    setStats(0, '0.0', '–');
+    return;
+  }
+
+  ordersEl.innerHTML = `<div class="empty">📡 Calculating live routes…</div>`;
+  const wakeupTimer = setTimeout(()=>{
+    if(myToken === requestToken){
+      ordersEl.innerHTML = `<div class="empty">📡 Waking up the routing server…<br>this can take up to a minute the first time.</div>`;
     }
-    return { id, color, reachable, dist, label: nodes[id].label };
-  });
+  }, 4000);
 
-  rows.sort((a,b)=>{
-    if(a.reachable !== b.reachable) return a.reachable ? -1 : 1;
-    return (a.dist ?? Infinity) - (b.dist ?? Infinity);
-  });
+  let data;
+  try{
+    data = await fetchRoutes(DEPOT_ID, orderIds);
+  }catch(err){
+    clearTimeout(wakeupTimer);
+    if(myToken !== requestToken) return;
+    ordersEl.innerHTML = `
+      <div class="empty">
+        Couldn't reach the live routing server.<br>
+        <span style="font-size:11px">${err.message}</span>
+      </div>`;
+    const retry = document.createElement('button');
+    retry.textContent = 'Try again';
+    retry.addEventListener('click', render);
+    ordersEl.querySelector('.empty').appendChild(document.createElement('br'));
+    ordersEl.querySelector('.empty').appendChild(retry);
+    return;
+  }
+  clearTimeout(wakeupTimer);
+  if(myToken !== requestToken) return; // a newer request superseded this one
+
+  const rows = data.deliveries.map(d => ({
+    id: d.customer,
+    reachable: d.reachable,
+    dist: d.distance_m,
+    eta: d.eta_min,
+    label: d.label,
+    coords: d.path_coords,
+  }));
 
   rows.forEach((r,i)=>{
-    const marker = L.marker([nodes[r.id].lat, nodes[r.id].lon], {
-      icon: L.divIcon({ className:'', html:`<div class="d-pin" style="background:${r.color}">${i+1}</div>`, iconSize:[26,26], iconAnchor:[13,13] })
+    const color = ROUTE_COLORS[i % ROUTE_COLORS.length];
+    r.color = color;
+    if(r.reachable){
+      L.polyline(r.coords, { color, weight:5, opacity:.9, className:'route-line' }).addTo(routeLayer);
+    }
+    const n = nodes[r.id];
+    const marker = L.marker([n.lat, n.lon], {
+      icon: L.divIcon({ className:'', html:`<div class="d-pin" style="background:${color}">${i+1}</div>`, iconSize:[26,26], iconAnchor:[13,13] })
     }).addTo(markerLayer);
     marker.on('click', ()=>removeOrder(r.id));
   });
 
-  const ordersEl = document.getElementById('orders');
   ordersEl.innerHTML = '';
-  if(rows.length === 0){
-    ordersEl.innerHTML = `<div class="empty">No deliveries yet.<br>Tap the map to add one.</div>`;
-  }
   rows.forEach((r,i)=>{
     const div = document.createElement('div');
     div.className = 'order' + (r.reachable ? '' : ' unreachable');
@@ -523,7 +526,7 @@ function render(){
       <div class="badge" style="background:${r.color}">${i+1}</div>
       <div class="info">
         <div class="label">${r.label}</div>
-        <div class="meta">${r.reachable ? `${(r.dist/1000).toFixed(1)} km &middot; ${etaMin(r.dist).toFixed(0)} min drive` : 'No route found'}</div>
+        <div class="meta">${r.reachable ? `${(r.dist/1000).toFixed(1)} km &middot; ${Math.round(r.eta)} min drive` : 'No route found'}</div>
       </div>
       <button class="rm" title="Remove delivery">&times;</button>`;
     div.querySelector('.rm').addEventListener('click', ()=>removeOrder(r.id));
@@ -531,11 +534,11 @@ function render(){
   });
 
   const reachableRows = rows.filter(r=>r.reachable);
-  document.getElementById('statOrders').textContent = orderIds.length;
-  document.getElementById('statDist').textContent = (reachableRows.reduce((s,r)=>s+r.dist,0)/1000).toFixed(1);
-  document.getElementById('statEta').textContent = reachableRows.length
-    ? Math.round(Math.max(...reachableRows.map(r=>etaMin(r.dist)))) + ' min'
-    : '–';
+  setStats(
+    orderIds.length,
+    (reachableRows.reduce((s,r)=>s+r.dist,0)/1000).toFixed(1),
+    reachableRows.length ? Math.round(Math.max(...reachableRows.map(r=>r.eta))) + ' min' : '–'
+  );
 }
 
 function removeOrder(id){
