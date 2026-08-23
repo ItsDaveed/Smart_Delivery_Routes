@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Smart Delivery Routes</title>
+<title>Smart Delivery Routes — Port Harcourt</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -40,6 +40,7 @@
     display:flex;
     align-items:center;
     gap:8px;
+    flex-wrap:wrap;
   }
   .live-badge{
     font-size:10.5px;
@@ -50,6 +51,17 @@
     border-radius:999px;
     padding:3px 9px;
     letter-spacing:.02em;
+  }
+  .fallback-badge{
+    font-size:10.5px;
+    font-weight:700;
+    color:#9a6b00;
+    background:#FFF4DE;
+    border:1px solid #F3DDA6;
+    border-radius:999px;
+    padding:3px 9px;
+    letter-spacing:.02em;
+    display:none;
   }
   .subtitle{
     color:var(--muted);
@@ -248,14 +260,6 @@
     color:#fff; font-weight:700; font-size:11.5px;
   }
 
-  .flow-arrow{
-    width:0; height:0;
-    border-left:4px solid transparent;
-    border-right:4px solid transparent;
-    border-bottom:6px solid #B7ADA0;
-    opacity:.6;
-  }
-
   .route-line{
     stroke-dasharray:1 10;
     stroke-linecap:round;
@@ -278,8 +282,12 @@
 <body>
 
 <header>
-  <h1>🛵 Smart Delivery Routes <span class="live-badge">● LIVE API</span></h1>
-  <div class="subtitle">This shows how a restaurant can find the fastest way to reach every delivery — using real streets and real one-way rules, not just a straight line on the map. Every route below is calculated by a live routing server, not just this browser.</div>
+  <h1>
+    🛵 Smart Delivery Routes — Port Harcourt
+    <span class="live-badge">● LIVE API</span>
+    <span class="fallback-badge" id="fallbackBadge">⚠ Demo grid (live map data unavailable)</span>
+  </h1>
+  <div class="subtitle">Real streets around the University of Port Harcourt, pulled live from OpenStreetMap. Every route below is calculated by a live routing server on the real road network — respecting real one-way streets, not a straight line on the map.</div>
 </header>
 
 <main>
@@ -299,12 +307,12 @@
     </div>
     <div id="orders"></div>
     <div class="legend">
-      <div>🔴 <b>Restaurant</b> — where every route starts</div>
+      <div>🔴 <b>Restaurant</b> — University of Port Harcourt</div>
       <div>🔵 <b>Numbered pins</b> — deliveries, closest first</div>
-      <div>↳ Small arrows show which way streets go. Routes bend around them instead of cutting straight across.</div>
+      <div>↳ Routes follow real streets and respect real one-way restrictions from OpenStreetMap — that's why some bend instead of cutting straight across.</div>
       <details>
         <summary>ℹ️ How this actually works</summary>
-        <p>Every time you add or remove a delivery, this page calls a live API running <b>Dijkstra's algorithm</b> at <code>smart-delivery-routes-live-api.onrender.com</code>. It calculates the true shortest legal driving distance from the restaurant to every delivery spot in one pass — respecting one-way streets instead of assuming you can drive as the crow flies. The server can take up to a minute to respond if it's been idle and is waking back up.</p>
+        <p>Every time you add or remove a delivery, this page calls a live API running <b>Dijkstra's algorithm</b> at <code>smart-delivery-routes-live-api.onrender.com</code>, on top of real road data for Port Harcourt pulled from OpenStreetMap. It calculates the true shortest legal driving distance from the restaurant to every delivery spot in one pass. The server can take up to a minute to respond if it's been idle and is waking back up. If live map data can't be loaded, the API automatically falls back to a demo grid so it still works — you'll see a warning badge above if that happens.</p>
       </details>
     </div>
   </aside>
@@ -313,91 +321,24 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script>
 /* =========================================================================
-   ROAD GRID (visual only) — mirrors delivery_router.py's build_manhattan_grid()
-   Used to draw the base map (intersections + one-way arrows) and to snap
-   map clicks to the nearest intersection. The actual routing — distances,
-   paths, ETAs — is no longer computed here; it comes from the live API.
-   ========================================================================= */
-const REF_LAT = 40.7580, REF_LON = -73.9855;
-const REF_AVE = 7, REF_ST = 42;
-const BLOCK_NS_M = 80, BLOCK_EW_M = 274;
-const AVENUES = [3,4,5,6,7,8,9];
-const STREETS = [34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50];
-
-const LAT_PER_M = 1/111320;
-const LON_PER_M = 1/(111320*Math.cos(REF_LAT*Math.PI/180));
-
-function ordinal(n){
-  const s = ["th","st","nd","rd"], v = n%100;
-  return n + (s[(v-20)%10] || s[v] || s[0]);
-}
-function nodeId(ave, st){ return `A${ave}S${st}`; }
-function label(ave, st){ return `${ordinal(ave)} Ave & ${ordinal(st)} St`; }
-
-const nodes = {}; // id -> {lat, lon, ave, st, label}
-for(const ave of AVENUES){
-  for(const st of STREETS){
-    const lat = REF_LAT + (st - REF_ST) * BLOCK_NS_M * LAT_PER_M;
-    const lon = REF_LON - (ave - REF_AVE) * BLOCK_EW_M * LON_PER_M;
-    nodes[nodeId(ave, st)] = { lat, lon, ave, st, label: label(ave, st) };
-  }
-}
-
-const streetMeta = {}; // st -> {eastbound}
-for(const st of STREETS){ streetMeta[st] = { eastbound: (st % 2 === 0) }; }
-const aveMeta = {}; // ave -> {northbound}
-for(const ave of AVENUES){ aveMeta[ave] = { northbound: (ave % 2 === 0) }; }
-
-/* =========================================================================
-   MAP SETUP
-   ========================================================================= */
-const map = L.map('map', { zoomControl:true, attributionControl:true })
-  .setView([REF_LAT, REF_LON], 15);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-  maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-}).addTo(map);
-
-function bearingDeg(from, to){
-  const dx = to.lon-from.lon, dy = to.lat-from.lat;
-  return (Math.atan2(dx,dy)*180/Math.PI + 360) % 360;
-}
-
-for(const ave of AVENUES){
-  const pts = STREETS.map(st => nodes[nodeId(ave,st)]);
-  L.polyline(pts.map(p=>[p.lat,p.lon]), { color:'#D9D2C4', weight:2, opacity:.8 }).addTo(map);
-  const i = Math.floor(0.5*(pts.length-1));
-  const a = pts[i], b = pts[Math.min(i+1,pts.length-1)];
-  const from = aveMeta[ave].northbound ? a : b, to = aveMeta[ave].northbound ? b : a;
-  placeArrow(from, to);
-}
-for(const st of STREETS){
-  const pts = AVENUES.map(ave => nodes[nodeId(ave,st)]);
-  L.polyline(pts.map(p=>[p.lat,p.lon]), { color:'#D9D2C4', weight:2, opacity:.8 }).addTo(map);
-  const i = Math.floor(0.5*(pts.length-1));
-  const a = pts[i], b = pts[Math.min(i+1,pts.length-1)];
-  const from = streetMeta[st].eastbound ? b : a, to = streetMeta[st].eastbound ? a : b;
-  placeArrow(from, to);
-}
-function placeArrow(from, to){
-  const deg = bearingDeg(from, to);
-  const mid = { lat:(from.lat+to.lat)/2, lon:(from.lon+to.lon)/2 };
-  L.marker([mid.lat, mid.lon], {
-    icon: L.divIcon({ className:'', html:`<div class="flow-arrow" style="transform:rotate(${deg}deg)"></div>`, iconSize:[8,8], iconAnchor:[4,4] }),
-    interactive:false
-  }).addTo(map);
-}
-
-/* =========================================================================
-   LIVE API
+   LIVE API — all routing, geography, and labels now come from here.
+   Real OSM nodes don't have friendly "avenue,street" addresses, so every
+   point (depot, stops, routes) is just a lat/lon that the server resolves
+   against the real street graph.
    ========================================================================= */
 const API_BASE = 'https://smart-delivery-routes-live-api.onrender.com';
+const FALLBACK_CENTER = { lat: 4.9071, lon: 6.9170 }; // University of Port Harcourt
 
-async function fetchRoutes(depotId, customerIds){
-  const body = {
-    depot: `${nodes[depotId].ave},${nodes[depotId].st}`,
-    customers: customerIds.map(id => `${nodes[id].ave},${nodes[id].st}`)
-  };
+let DEPOT_LAT = FALLBACK_CENTER.lat;
+let DEPOT_LON = FALLBACK_CENTER.lon;
+
+async function fetchRoutes(customerLatLons, randomCount){
+  const body = { depot: `${DEPOT_LAT},${DEPOT_LON}` };
+  if(customerLatLons && customerLatLons.length){
+    body.customers = customerLatLons.map(s => `${s.lat},${s.lon}`);
+  } else {
+    body.random_count = randomCount || 6;
+  }
   const res = await fetch(`${API_BASE}/route`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -412,37 +353,26 @@ async function fetchRoutes(depotId, customerIds){
 }
 
 /* =========================================================================
-   STATE — restaurant, delivery stops, rendering
+   MAP SETUP
+   ========================================================================= */
+const map = L.map('map', { zoomControl:true, attributionControl:true })
+  .setView([FALLBACK_CENTER.lat, FALLBACK_CENTER.lon], 15);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+}).addTo(map);
+
+/* =========================================================================
+   STATE
    ========================================================================= */
 const ROUTE_COLORS = ['#2F80ED','#27AE60','#9B59B6','#00BCD4','#F2994A','#EC4899'];
-const DEPOT_ID = nodeId(7, 40);
-let orderIds = [];
+let stops = [];               // [{lat, lon}] — current delivery stops
 let routeLayer = L.layerGroup().addTo(map);
 let markerLayer = L.layerGroup().addTo(map);
 let requestToken = 0;
 
-function nearestNode(latlng){
-  let best=null, bestD=Infinity;
-  for(const id in nodes){
-    const n = nodes[id];
-    const d = (n.lat-latlng.lat)**2 + (n.lon-latlng.lng)**2;
-    if(d<bestD){ bestD=d; best=id; }
-  }
-  return best;
-}
-
-function randomOrders(n){
-  const pool = Object.keys(nodes).filter(id=>id!==DEPOT_ID);
-  const picked = [];
-  while(picked.length<n && pool.length){
-    const i = Math.floor(Math.random()*pool.length);
-    picked.push(pool.splice(i,1)[0]);
-  }
-  return picked;
-}
-
 function drawDepotMarker(){
-  L.marker([nodes[DEPOT_ID].lat, nodes[DEPOT_ID].lon], {
+  L.marker([DEPOT_LAT, DEPOT_LON], {
     icon: L.divIcon({ className:'', html:'<div class="r-pin"><div class="ring"></div>🍽️</div>', iconSize:[38,38], iconAnchor:[19,19] }),
     interactive:false
   }).addTo(markerLayer);
@@ -454,20 +384,13 @@ function setStats(count, totalKm, longestMin){
   document.getElementById('statEta').textContent = longestMin;
 }
 
-async function render(){
+async function render(customerLatLons, randomCount){
   const myToken = ++requestToken;
   routeLayer.clearLayers();
   markerLayer.clearLayers();
   drawDepotMarker();
 
   const ordersEl = document.getElementById('orders');
-
-  if(orderIds.length === 0){
-    ordersEl.innerHTML = `<div class="empty">No deliveries yet.<br>Tap the map to add one.</div>`;
-    setStats(0, '0.0', '–');
-    return;
-  }
-
   ordersEl.innerHTML = `<div class="empty">📡 Calculating live routes…</div>`;
   const wakeupTimer = setTimeout(()=>{
     if(myToken === requestToken){
@@ -477,7 +400,7 @@ async function render(){
 
   let data;
   try{
-    data = await fetchRoutes(DEPOT_ID, orderIds);
+    data = await fetchRoutes(customerLatLons, randomCount);
   }catch(err){
     clearTimeout(wakeupTimer);
     if(myToken !== requestToken) return;
@@ -488,7 +411,7 @@ async function render(){
       </div>`;
     const retry = document.createElement('button');
     retry.textContent = 'Try again';
-    retry.addEventListener('click', render);
+    retry.addEventListener('click', ()=>render(stops.length ? stops : null, 6));
     ordersEl.querySelector('.empty').appendChild(document.createElement('br'));
     ordersEl.querySelector('.empty').appendChild(retry);
     return;
@@ -496,12 +419,16 @@ async function render(){
   clearTimeout(wakeupTimer);
   if(myToken !== requestToken) return; // a newer request superseded this one
 
+  // resync local state to what the server actually resolved (snapped coords, sorted order)
+  stops = data.deliveries.map(d => ({ lat: d.lat, lon: d.lon }));
+
   const rows = data.deliveries.map(d => ({
-    id: d.customer,
     reachable: d.reachable,
     dist: d.distance_m,
     eta: d.eta_min,
     label: d.label,
+    lat: d.lat,
+    lon: d.lon,
     coords: d.path_coords,
   }));
 
@@ -511,14 +438,16 @@ async function render(){
     if(r.reachable){
       L.polyline(r.coords, { color, weight:5, opacity:.9, className:'route-line' }).addTo(routeLayer);
     }
-    const n = nodes[r.id];
-    const marker = L.marker([n.lat, n.lon], {
+    const marker = L.marker([r.lat, r.lon], {
       icon: L.divIcon({ className:'', html:`<div class="d-pin" style="background:${color}">${i+1}</div>`, iconSize:[26,26], iconAnchor:[13,13] })
     }).addTo(markerLayer);
-    marker.on('click', ()=>removeOrder(r.id));
+    marker.on('click', ()=>removeOrder(i));
   });
 
   ordersEl.innerHTML = '';
+  if(rows.length === 0){
+    ordersEl.innerHTML = `<div class="empty">No deliveries yet.<br>Tap the map to add one.</div>`;
+  }
   rows.forEach((r,i)=>{
     const div = document.createElement('div');
     div.className = 'order' + (r.reachable ? '' : ' unreachable');
@@ -529,37 +458,52 @@ async function render(){
         <div class="meta">${r.reachable ? `${(r.dist/1000).toFixed(1)} km &middot; ${Math.round(r.eta)} min drive` : 'No route found'}</div>
       </div>
       <button class="rm" title="Remove delivery">&times;</button>`;
-    div.querySelector('.rm').addEventListener('click', ()=>removeOrder(r.id));
+    div.querySelector('.rm').addEventListener('click', ()=>removeOrder(i));
     ordersEl.appendChild(div);
   });
 
   const reachableRows = rows.filter(r=>r.reachable);
   setStats(
-    orderIds.length,
+    stops.length,
     (reachableRows.reduce((s,r)=>s+r.dist,0)/1000).toFixed(1),
     reachableRows.length ? Math.round(Math.max(...reachableRows.map(r=>r.eta))) + ' min' : '–'
   );
 }
 
-function removeOrder(id){
-  orderIds = orderIds.filter(o=>o!==id);
-  render();
+function removeOrder(i){
+  stops.splice(i, 1);
+  render(stops.length ? stops : null, 6);
 }
 
 map.on('click', (e)=>{
-  const id = nearestNode(e.latlng);
-  if(id===DEPOT_ID || orderIds.includes(id)) return;
-  orderIds.push(id);
-  render();
+  stops.push({ lat: e.latlng.lat, lon: e.latlng.lng });
+  render(stops, null);
 });
 
 document.getElementById('shuffleBtn').addEventListener('click', ()=>{
-  orderIds = randomOrders(6);
-  render();
+  stops = [];
+  render(null, 6);
 });
 
-orderIds = randomOrders(6);
-render();
+/* =========================================================================
+   STARTUP — ask the API where the depot actually is and which data source
+   is active, then draw the map around it.
+   ========================================================================= */
+(async function init(){
+  try{
+    const cfg = await fetch(`${API_BASE}/`).then(r => r.json());
+    const [lat, lon] = cfg.depot_default.split(',').map(Number);
+    DEPOT_LAT = lat; DEPOT_LON = lon;
+    map.setView([DEPOT_LAT, DEPOT_LON], 15);
+    if(cfg.data_source !== 'openstreetmap'){
+      document.getElementById('fallbackBadge').style.display = 'inline-block';
+    }
+  }catch(e){
+    // API unreachable at startup -- keep the hardcoded fallback center and
+    // let the first render() call surface the connection error normally.
+  }
+  render(null, 6);
+})();
 </script>
 </body>
 </html>
